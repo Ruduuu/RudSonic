@@ -4,4 +4,8 @@
     "outputDirectory": ".next",
     "framework": "nextjs",
     "regions": ["bom1"]
+<<<<<<< HEAD
 }
+=======
+}
+>>>>>>> 4d684695568424824d98b3d00f309683a400e0d9
