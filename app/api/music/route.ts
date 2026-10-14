@@ -2,119 +2,120 @@ import { NextRequest, NextResponse } from 'next/server';
 
 export const runtime = 'edge';
 
-const JAMENDO_BASE = 'https://api.jamendo.com/v3.0';
-const CLIENT_ID = process.env.JAMENDO_CLIENT_ID ?? '';
+// ── Jamendo API v3 ───────────────────────────────────────────
+// Docs: https://developer.jamendo.com/v3.0/tracks
+// Free, CC-licensed music. 600,000+ tracks.
 
-// Map our genre names to Jamendo tags
-const GENRE_TAG_MAP: Record<string, string> = {
-  cinematic: 'cinematicorchestral',
-  ambient: 'ambient',
-  lofi: 'lofi',
-  hiphop: 'hiphop',
-  electronic: 'electronic',
-  corporate: 'corporate',
-  pop: 'pop',
-  jazz: 'jazz',
-  rock: 'rock',
-  emotional: 'emotional',
-  motivational: 'motivational',
-  travel: 'travel',
-  wedding: 'acoustic',
-  documentary: 'documentary',
-  vlog: 'vlog',
+const JAMENDO_BASE = 'https://api.jamendo.com/v3.0';
+
+// MUSIC DURATION HARD LIMIT: 5 minutes = 300 seconds
+const MUSIC_MAX_DURATION = 300;
+
+// Map mood UI names → Jamendo vartags
+const MOOD_TAGS: Record<string, string> = {
+  cinematic:    'cinematic epic orchestral dramatic score',
+  lofi:         'lofi chill lo-fi beats study relaxing',
+  ambient:      'ambient atmospheric peaceful meditative space',
+  motivational: 'motivational uplifting inspiring corporate',
+  emotional:    'emotional sad melancholic touching heartfelt',
+  happy:        'happy joyful upbeat cheerful fun',
+  dark:         'dark suspense tension thriller noir',
+  romantic:     'romantic love wedding gentle',
 };
 
-// Map mood to Jamendo vocalinstrumental / acousticelectric params
-const MOOD_TAG_MAP: Record<string, string> = {
-  happy: 'happy',
-  sad: 'sad',
-  epic: 'epic',
-  dark: 'dark',
-  chill: 'chill',
-  romantic: 'romantic',
-  energetic: 'energetic',
-  peaceful: 'relaxing',
+// Map genre chip names → Jamendo tags
+const GENRE_TAGS: Record<string, string> = {
+  cinematic:    'cinematic',
+  lofi:         'lofi',
+  ambient:      'ambient',
+  electronic:   'electronic',
+  jazz:         'jazz',
+  rock:         'rock',
+  pop:          'pop',
+  hiphop:       'hiphop',
+  classical:    'classical',
+  funk:         'funk',
+  acoustic:     'acoustic',
+  bgm:          'background instrumental film',
+  vlog:         'vlog travel upbeat energetic',
+  wedding:      'wedding romantic love',
+  documentary:  'documentary nature ambient cinematic',
+  ads:          'corporate upbeat motivational advertising',
 };
 
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
-  const q = searchParams.get('q') ?? '';
-  const genre = searchParams.get('genre') ?? '';
-  const mood = searchParams.get('mood') ?? '';
-  const bpmMin = searchParams.get('bpmMin') ?? '60';
-  const bpmMax = searchParams.get('bpmMax') ?? '200';
-  const durationMax = searchParams.get('durationMax') ?? '600';
-  const page = parseInt(searchParams.get('page') ?? '1', 10);
-  const limit = 30;
+  const q           = searchParams.get('q') ?? '';
+  const genre       = searchParams.get('genre') ?? '';
+  const mood        = searchParams.get('mood') ?? '';
+  const durationMax = Math.min(
+    parseInt(searchParams.get('durationMax') ?? String(MUSIC_MAX_DURATION), 10),
+    MUSIC_MAX_DURATION // never exceed 5 min regardless of what client sends
+  );
+  const page    = parseInt(searchParams.get('page') ?? '1', 10);
+  const perPage = 30;
+  const offset  = (page - 1) * perPage;
 
-  // Build Jamendo tag filter
-  const tags: string[] = [];
-  if (genre && GENRE_TAG_MAP[genre.toLowerCase()]) {
-    tags.push(GENRE_TAG_MAP[genre.toLowerCase()]);
-  }
-  if (mood && MOOD_TAG_MAP[mood.toLowerCase()]) {
-    tags.push(MOOD_TAG_MAP[mood.toLowerCase()]);
-  }
+  const CLIENT_ID = process.env.JAMENDO_CLIENT_ID ?? '';
 
+  // ── Build Jamendo parameters ───────────────────────────────
   const params = new URLSearchParams({
-    client_id: CLIENT_ID,
-    format: 'json',
-    limit: String(limit),
-    offset: String((page - 1) * limit),
-    include: 'musicinfo+stats',
+    client_id:   CLIENT_ID,
+    format:      'json',
+    limit:       String(perPage),
+    offset:      String(offset),
     audioformat: 'mp31',
-    imagesize: '200',
+    imagesize:   '200',
+    include:     'musicinfo',
+    order:       'popularity_total',
+    // HARD: max 5 minutes, min 10 seconds (avoids tiny jingles in music)
+    durationbetween: `10_${durationMax}`,
   });
 
-  // Search term
+  // Text search
   if (q) params.set('namesearch', q);
 
-  // Genre/mood as tags
-  if (tags.length > 0) params.set('tags', tags.join('+'));
-
-  // BPM filter
-  if (bpmMin !== '60' || bpmMax !== '200') {
-    params.set('bpmmin', bpmMin);
-    params.set('bpmmax', bpmMax);
+  // Genre filter
+  if (genre && GENRE_TAGS[genre.toLowerCase()]) {
+    params.set('tags', GENRE_TAGS[genre.toLowerCase()]);
+  } else if (genre) {
+    params.set('tags', genre);
   }
 
-  // Duration filter (seconds)
-  params.set('durationbetween', `1_${durationMax}`);
-
-  // Order by popularity if no query
-  if (!q) params.set('order', 'popularity_total');
+  // Mood filter (uses fuzzytags on Jamendo)
+  if (mood && MOOD_TAGS[mood.toLowerCase()]) {
+    params.set('fuzzytags', MOOD_TAGS[mood.toLowerCase()]);
+  }
 
   try {
     const url = `${JAMENDO_BASE}/tracks/?${params.toString()}`;
     const res = await fetch(url, { next: { revalidate: 300 } });
 
     if (!res.ok) {
-      return NextResponse.json({ error: 'Jamendo API error', status: res.status }, { status: 502 });
+      return NextResponse.json(
+        { error: 'Jamendo API error', status: res.status },
+        { status: 502 }
+      );
     }
 
     const data = await res.json();
-    const tracks = (data.results ?? []).map((t: JamendoTrack) => ({
-      id: String(t.id),
-      title: t.name,
-      artist: t.artist_name,
-      album: t.album_name,
-      duration: t.duration, // seconds
-      bpm: t.musicinfo?.tempo ?? null,
-      genre: t.musicinfo?.tags?.genres?.[0] ?? genre ?? 'Music',
-      mood: t.musicinfo?.tags?.vartags?.[0] ?? mood ?? '',
-      previewUrl: t.audio,          // Jamendo audio stream (MP3)
-      imageUrl: t.image,
-      license: t.license_ccurl?.includes('by') ? 'CC-BY' : 'CC0',
-      licenseUrl: t.license_ccurl,
-      source: 'jamendo',
-      jamendoUrl: t.shareurl,
-    }));
+    const tracks: JamendoTrack[] = data.results ?? [];
+    const total: number          = data.headers?.results_fullcount ?? tracks.length;
+
+    // ── HARD FILTER: duration 10–300 seconds ─────────────────
+    const results = tracks
+      .filter(t => {
+        const d = Number(t.duration);
+        return !isNaN(d) && d >= 10 && d <= MUSIC_MAX_DURATION;
+      })
+      .map(t => _normalize(t));
 
     return NextResponse.json({
-      results: tracks,
-      total: data.headers?.results_count ?? tracks.length,
+      results,
+      total,
       page,
-      limit,
+      pageSize: perPage,
+      nextPage: offset + perPage < total ? page + 1 : null,
     });
   } catch (err) {
     console.error('[/api/music] Error:', err);
@@ -122,24 +123,53 @@ export async function GET(req: NextRequest) {
   }
 }
 
-// ── Types ─────────────────────────────────────────────────────
+// ── Normalise Jamendo track → RudSonic Music format ───────────
+function _normalize(t: JamendoTrack) {
+  const dur = Number(t.duration);
+  return {
+    id:          String(t.id),
+    title:       t.name || 'Untitled',
+    artist:      t.artist_name || 'Unknown Artist',
+    album:       t.album_name  || '',
+    duration:    isNaN(dur) ? 0 : dur,                // seconds
+    bpm:         t.musicinfo?.speed ?? null,
+    genre:       t.musicinfo?.tags?.genres?.[0] ?? '',
+    mood:        t.musicinfo?.tags?.vartags?.[0] ?? '',
+    previewUrl:  t.audio,                             // streaming MP3
+    imageUrl:    t.image,
+    license:     _license(t.license_ccurl),
+    licenseUrl:  t.license_ccurl,
+    source:      'jamendo',
+    jamendoUrl:  t.shareurl ?? `https://www.jamendo.com/track/${t.id}`,
+  };
+}
+
+function _license(url?: string): string {
+  if (!url) return 'CC-BY';
+  if (url.includes('publicdomain') || url.includes('zero')) return 'CC0';
+  if (url.includes('by-nc-nd')) return 'CC-BY-NC-ND';
+  if (url.includes('by-nc-sa')) return 'CC-BY-NC-SA';
+  if (url.includes('by-nc'))    return 'CC-BY-NC';
+  if (url.includes('by-sa'))    return 'CC-BY-SA';
+  if (url.includes('by-nd'))    return 'CC-BY-ND';
+  return 'CC-BY';
+}
+
+// ── Jamendo API types ─────────────────────────────────────────
 interface JamendoTrack {
-  id: number;
-  name: string;
-  duration: number;
-  artist_name: string;
-  artist_id: string;
-  album_name: string;
-  album_id: string;
-  audio: string;
-  audiodownload: string;
-  image: string;
-  shareurl: string;
-  license_ccurl: string;
+  id:            number | string;
+  name?:         string;
+  artist_name?:  string;
+  album_name?:   string;
+  duration?:     number | string;
+  audio?:        string;
+  image?:        string;
+  shareurl?:     string;
+  license_ccurl?:string;
   musicinfo?: {
-    tempo?: number;
+    speed?:  string;
     tags?: {
-      genres?: string[];
+      genres?:  string[];
       vartags?: string[];
     };
   };

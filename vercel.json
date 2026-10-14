@@ -1,11 +1,11 @@
 {
-    "version": 2,
-    "buildCommand": "npm run build",
-    "outputDirectory": ".next",
-    "framework": "nextjs",
-    "regions": ["bom1"]
-<<<<<<< HEAD
+  "version": 2,
+  "buildCommand": "npm run build",
+  "outputDirectory": ".next",
+  "framework": "nextjs",
+  "regions": ["bom1"],
+  "env": {
+    "JAMENDO_CLIENT_ID": "@jamendo_client_id",
+    "API_LEAGUE_KEY":    "@api_league_key"
+  }
 }
-=======
-}
->>>>>>> 4d684695568424824d98b3d00f309683a400e0d9

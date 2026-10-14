@@ -2,25 +2,34 @@ import { NextRequest, NextResponse } from 'next/server';
 
 export const runtime = 'edge';
 
-// ── Internet Archive API — No API key required ────────────────
-const ARCHIVE_SEARCH = 'https://archive.org/advancedsearch.php';
-const ARCHIVE_META   = 'https://archive.org/metadata';
+// ── API League — Search Sound Effects ─────────────────────────
+// Endpoint: https://api.apileague.com/search-sound-effects
+// Backed by Pixabay's sound library (~50,000 CC0 sounds)
+// Docs: https://apileague.com/apis/find/sound-effects/
 
-// Map our UI categories to Archive.org search queries
+const API_LEAGUE_URL = 'https://api.apileague.com/search-sound-effects';
+
+// SFX DURATION HARD LIMIT: 30 seconds max
+const SFX_MAX_DURATION = 30;
+
+// Map our UI category buttons → search keywords
 const CATEGORY_QUERIES: Record<string, string> = {
-  whooshes:        'whoosh swoosh sound effect',
-  transitions:     'transition swipe sweep sound effect',
-  impacts:         'impact explosion boom punch hit sound effect',
-  risers:          'riser build tension suspense sound effect',
-  'cinematic-hits':'cinematic hit dramatic score stinger',
-  'ui-sounds':     'ui click notification interface button beep blip',
-  footsteps:       'footstep walking steps sound effect',
-  ambience:        'ambient atmosphere background sound loop',
-  nature:          'rain wind forest birds nature sound',
-  'sci-fi':        'science fiction futuristic laser space scifi',
-  foley:           'foley cloth texture movement sound',
-  doors:           'door open close creak squeak',
-  vehicles:        'car engine motor vehicle sound effect',
+  whooshes:         'whoosh swoosh',
+  transitions:      'transition swipe sweep',
+  impacts:          'impact explosion boom punch hit',
+  risers:           'riser buildup tension suspense',
+  'cinematic-hits': 'cinematic stinger dramatic hit',
+  'ui-sounds':      'ui click notification button beep interface',
+  footsteps:        'footsteps walking steps',
+  ambience:         'ambient atmosphere background',
+  nature:           'rain wind forest birds',
+  traffic:          'traffic car city street',
+  city:             'city crowd outdoor urban',
+  typing:           'typing keyboard click',
+  clock:            'clock ticking tick tock',
+  'sci-fi':         'futuristic laser science fiction',
+  foley:            'foley movement cloth texture',
+  doors:            'door open close creak',
 };
 
 export async function GET(req: NextRequest) {
@@ -28,105 +37,58 @@ export async function GET(req: NextRequest) {
   const q        = searchParams.get('q') ?? '';
   const category = searchParams.get('category') ?? '';
   const page     = parseInt(searchParams.get('page') ?? '1', 10);
-  const perPage  = 20; // Smaller page size: we make 1 metadata call per result
+  const perPage  = 30;
 
-  // Build Archive.org query
-  let baseQuery = q;
-  if (!baseQuery && category && CATEGORY_QUERIES[category.toLowerCase()]) {
-    baseQuery = CATEGORY_QUERIES[category.toLowerCase()];
-  } else if (!baseQuery) {
-    baseQuery = 'sound effect';
+  // Build query string
+  let query = q.trim();
+  if (!query && category) {
+    query = CATEGORY_QUERIES[category.toLowerCase()] ?? category;
   }
+  if (!query) query = 'sound effect';
 
-  // Filter: audio mediatype + CC/public domain license
-  const fullQuery = `(${baseQuery}) AND mediatype:audio AND (licenseurl:*creativecommons* OR licenseurl:*publicdomain*)`;
+  const offset = (page - 1) * perPage;
 
-  const params = new URLSearchParams();
-  params.set('q', fullQuery);
-  params.set('output', 'json');
-  params.set('rows', String(perPage));
-  params.set('start', String((page - 1) * perPage));
-  params.append('fl[]', 'identifier');
-  params.append('fl[]', 'title');
-  params.append('fl[]', 'creator');
-  params.append('fl[]', 'subject');
-  params.append('fl[]', 'downloads');
-  params.append('fl[]', 'avg_rating');
-  params.append('sort[]', 'downloads desc');
+  const params = new URLSearchParams({
+    query,
+    number: String(perPage),
+    offset: String(offset),
+  });
 
   try {
-    // ── Step 1: Search Archive.org ────────────────────────────
-    const searchRes = await fetch(`${ARCHIVE_SEARCH}?${params.toString()}`, {
-      next: { revalidate: 300 },
+    const res = await fetch(`${API_LEAGUE_URL}?${params.toString()}`, {
+      headers: {
+        'x-api-key': process.env.API_LEAGUE_KEY ?? '',
+      },
+      next: { revalidate: 300 }, // 5-min edge cache
     });
-    if (!searchRes.ok) {
-      return NextResponse.json({ error: 'Archive.org search failed', status: searchRes.status }, { status: 502 });
+
+    if (!res.ok) {
+      return NextResponse.json(
+        { error: 'API League error', status: res.status },
+        { status: 502 }
+      );
     }
-    const searchData = await searchRes.json();
-    const docs: ArchiveDoc[] = searchData.response?.docs ?? [];
-    const total: number      = searchData.response?.numFound ?? 0;
 
-    // ── Step 2: Fetch metadata for each item in parallel ──────
-    // This gives us the actual audio file URLs
-    const metaFetches = docs.map(async (doc): Promise<SFXItem | null> => {
-      try {
-        const metaRes = await fetch(`${ARCHIVE_META}/${doc.identifier}`, {
-          next: { revalidate: 3600 }, // cache metadata 1 hour
-        });
-        if (!metaRes.ok) return null;
-        const meta: ArchiveMeta = await metaRes.json();
+    const data = await res.json();
 
-        const files = meta.files ?? [];
+    // API League returns: { sounds: [...], available: N }
+    const rawSounds: ApiLeagueSound[] = data.sounds ?? [];
+    const total: number               = data.available ?? rawSounds.length;
 
-        // Find best audio file — prefer short original MP3s
-        const audioFile =
-          files.find(f => f.name.endsWith('.mp3') && f.source === 'original') ??
-          files.find(f => f.format === '128Kbps MP3' || f.format === 'VBR MP3') ??
-          files.find(f => f.name.endsWith('.mp3')) ??
-          files.find(f => f.name.endsWith('.ogg')) ??
-          files.find(f => f.name.endsWith('.wav'));
-
-        if (!audioFile) return null;
-
-        // Build download URL using server + dir from metadata
-        const server  = meta.server  ?? 'archive.org';
-        const dir     = meta.dir     ?? `/download/${doc.identifier}`;
-        const audioUrl = `https://${server}${dir}/${encodeURIComponent(audioFile.name)}`;
-
-        const rawDuration = parseFloat(audioFile.length ?? '0');
-        const duration    = isNaN(rawDuration) ? 0 : Math.round(rawDuration * 10) / 10;
-
-        const subjectRaw = Array.isArray(doc.subject)
-          ? doc.subject.join(', ')
-          : (doc.subject ?? '');
-
-        return {
-          id:          doc.identifier,
-          name:        doc.title || doc.identifier,
-          duration,
-          tags:        subjectRaw.split(/[,;]/).map(s => s.trim()).filter(Boolean).slice(0, 6),
-          category:    _guessCategory(subjectRaw, baseQuery, category),
-          previewUrl:  audioUrl,
-          waveformUrl: '', // Archive.org does not provide waveform images
-          license:     _detectLicense(meta.metadata?.licenseurl),
-          author:      doc.creator || 'Archive.org',
-          downloads:   doc.downloads ?? 0,
-          source:      'archive',
-          archiveUrl:  `https://archive.org/details/${doc.identifier}`,
-        };
-      } catch {
-        return null;
-      }
-    });
-
-    const results = (await Promise.all(metaFetches)).filter((r): r is SFXItem => r !== null);
+    // ── HARD FILTER: only sounds ≤ 30 seconds ────────────────
+    const results = rawSounds
+      .filter(s => {
+        const dur = typeof s.duration === 'number' ? s.duration : parseFloat(String(s.duration ?? '999'));
+        return !isNaN(dur) && dur > 0 && dur <= SFX_MAX_DURATION;
+      })
+      .map(s => _normalize(s, category));
 
     return NextResponse.json({
       results,
       total,
       page,
-      pageSize: perPage,
-      nextPage: page * perPage < total ? page + 1 : null,
+      pageSize:   perPage,
+      nextPage:   offset + perPage < total ? page + 1 : null,
     });
   } catch (err) {
     console.error('[/api/sfx] Error:', err);
@@ -134,65 +96,55 @@ export async function GET(req: NextRequest) {
   }
 }
 
-// ── Helpers ───────────────────────────────────────────────────
+// ── Normalise API League sound → RudSonic SFX format ─────────
+function _normalize(s: ApiLeagueSound, uiCategory: string) {
+  const dur = typeof s.duration === 'number' ? s.duration : parseFloat(String(s.duration ?? '0'));
+  const tags = (s.tags ?? '').split(',').map((t: string) => t.trim()).filter(Boolean);
 
-function _guessCategory(subject: string, query: string, uiCategory: string): string {
-  const t = (subject + ' ' + query).toLowerCase();
+  return {
+    id:          String(s.id ?? s.url ?? Math.random()),
+    name:        s.title || tags[0] || 'Sound',
+    duration:    Math.round((isNaN(dur) ? 0 : dur) * 10) / 10,
+    tags:        tags.slice(0, 6),
+    category:    _guessCategory(s.tags ?? '', uiCategory),
+    previewUrl:  s.url,       // Direct CDN MP3 link from Pixabay
+    waveformUrl: '',          // Not provided by API League
+    license:     'CC0',       // All API League sounds are CC0
+    author:      s.user ?? 'Pixabay',
+    downloads:   s.downloads  ?? 0,
+    source:      'apileague',
+    pixabayUrl:  s.pixabay_url ?? '',
+  };
+}
+
+function _guessCategory(tags: string, uiCategory: string): string {
+  const t = tags.toLowerCase();
   if (t.match(/whoosh|swoosh/))              return 'Whooshes';
   if (t.match(/impact|explosion|boom|punch/)) return 'Impacts';
   if (t.match(/transition|swipe/))           return 'Transitions';
-  if (t.match(/riser|tension|suspense/))     return 'Risers';
+  if (t.match(/riser|buildup|tension/))      return 'Risers';
   if (t.match(/click|ui|notification|button/))return 'UI Sounds';
-  if (t.match(/footstep|walking/))           return 'Footsteps';
-  if (t.match(/rain|wind|birds|nature/))     return 'Ambience';
-  if (t.match(/scifi|futuristic|laser/))     return 'Sci-Fi';
-  if (t.match(/foley|cloth/))               return 'Foley';
+  if (t.match(/footstep|walking|steps/))     return 'Footsteps';
+  if (t.match(/rain|wind|forest|birds/))     return 'Nature';
+  if (t.match(/traffic|car|city|street/))    return 'Traffic/City';
+  if (t.match(/typing|keyboard/))            return 'Typing';
+  if (t.match(/clock|tick/))                 return 'Clock';
+  if (t.match(/ambient|atmosphere/))         return 'Ambience';
+  if (t.match(/futuristic|laser|scifi/))     return 'Sci-Fi';
+  if (t.match(/door|creak/))                 return 'Doors';
   if (t.match(/cinematic|dramatic/))         return 'Cinematic';
-  if (uiCategory) return uiCategory.charAt(0).toUpperCase() + uiCategory.slice(1);
+  if (uiCategory) return uiCategory.charAt(0).toUpperCase() + uiCategory.slice(1).replace(/-/g, ' ');
   return 'SFX';
 }
 
-function _detectLicense(url?: string): string {
-  if (!url) return 'CC';
-  if (url.includes('publicdomain') || url.includes('zero') || url.includes('cc0')) return 'CC0';
-  if (url.includes('by')) return 'CC-BY';
-  return 'CC';
-}
-
-// ── Types ─────────────────────────────────────────────────────
-interface ArchiveDoc {
-  identifier: string;
-  title:      string;
-  creator?:   string;
-  subject?:   string | string[];
-  downloads?: number;
-  avg_rating?:string;
-}
-
-interface ArchiveMeta {
-  server?:   string;
-  dir?:      string;
-  metadata?: { licenseurl?: string };
-  files?:    Array<{
-    name:    string;
-    format?: string;
-    source?: string;
-    length?: string;
-    size?:   string;
-  }>;
-}
-
-interface SFXItem {
-  id:          string;
-  name:        string;
-  duration:    number;
-  tags:        string[];
-  category:    string;
-  previewUrl:  string;
-  waveformUrl: string;
-  license:     string;
-  author:      string;
-  downloads:   number;
-  source:      string;
-  archiveUrl:  string;
+// ── API League response type ──────────────────────────────────
+interface ApiLeagueSound {
+  id?:          number | string;
+  title?:       string;
+  tags?:        string;
+  duration?:    number | string;
+  url?:         string;         // Direct CDN MP3 URL
+  user?:        string;
+  downloads?:   number;
+  pixabay_url?: string;
 }

@@ -8,7 +8,7 @@
 
     // ── Configuration ─────────────────────────────────────────────
     // Replace this with your actual Vercel deployment URL after deploying
-    var BASE_URL = 'https://rud_sonic.vercel.app';
+    var BASE_URL = 'https://rudsonic.vercel.app';
 
     // For local development, uncomment:
     // var BASE_URL = 'http://localhost:3000';
