@@ -32,7 +32,6 @@
             <!-- Allow Web Audio API, local file access -->
             <Parameter>--enable-nodejs</Parameter>
             <Parameter>--allow-file-access-from-files</Parameter>
-            <Parameter>--disable-web-security</Parameter>
           </CEFCommandLine>
         </Resources>
         <Lifecycle>
